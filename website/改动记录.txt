@@ -1,0 +1,28 @@
+1.0 创建苹果风格个人官网初版：HTML结构 + CSS样式 + JS交互，包含导航栏、Hero大标题、关于我、作品集大卡片、联系方式、页脚
+2.0 按要求移除头像：删除Hero右侧头像+浮动卡片，改为居中单栏布局（只放文字+CTA按钮）
+3.0 作品集预留七八个App位置：将作品集区改为8个大卡片占位，每卡带标题/描述/标签
+4.1 作品集改为iOS风格图标网格布局：4列圆角方形图标（渐变背景+内联SVG图标），hover上浮/按压缩放
+4.2 新增App详情模态框：点击图标弹窗展示大图/标题/评分/截图横滑区/介绍/功能列表/技术栈，支持遮罩/×按钮/ESC三重关闭
+4.3 新增右下角Agent聊天对话框：悬浮圆形按钮→点击展开380x560面板，含渐变Header/消息区/输入框/3个快捷回复按钮，打字指示器动画，内置7类关键词智能回复
+5.1 首屏直接展示App：删除原Hero大区域，将App图标网格置顶；首屏顶部新增大标题介绍+副标题（数字滚动动画保留）
+5.2 Agent默认展开：给chat-widget加.open类，进入页面对话框直接展开，仍支持×按钮收起
+5.3 导航栏精简：4项改为3项（首页/关于我/联系我）
+6.1 整体改为左右分栏布局（桌面端≥1100px）：左侧主内容区1fr + 右侧Agent侧栏380px sticky固定；≤1099px恢复右下角浮窗模式
+7.1 参考Guang's Space结构整体重写：①整体背景暖米黄渐变；②首屏Hero改圆角大卡片（BUILD·SHARE·ITERATE小字标签+超粗Build with AI大标题+简介）；③作品头部左侧「App作品(8)」+右侧筛选按钮（最新/最热/开发状态）；④8个App从图标网格改为3列完整作品信息卡片（状态Tag+日期+标题+描述+点赞/想要/评论数据+查看作品按钮）；⑤新增背单词1款为开发中(20%)橙色状态；⑥全改为数据驱动渲染（JS appsData数组→renderWorks()函数），便于后续维护
+8.1 修复顶部空隙bug：修正CSS变量名错误（--navbar-height → --nav-height），桌面端留白nav高+32px/平板nav高+20px；同步修复右侧Agent栏top/height同一变量名错误
+8.2 修复右侧Agent输入框不显示：侧边栏模式下分别给chat-header/chat-messages/chat-input-area设置flex-shrink/overflow/flex:1，确保输入区不被挤压
+9.1 首屏内容默认显示：移除Hero大卡片、作品头部、作品网格3个首屏元素的reveal滚动渐显class，打开页面立刻渲染；关于我/联系方式/页脚保留滚动渐显
+10.1 删除最左边黄色列：移除Hero大卡片的两个径向渐变光晕背景（radial-gradient at -10%110%溢出形成黄条），改为纯净#FFFBF4纯色，加overflow:hidden防止后续溢出
+11.1 Logo文案改Shaw Space：两处logo-text（导航栏L18 + 页脚L332）统一由"My Apps"改为"Shaw Space"
+11.2 Logo再次强制落盘：导航栏L18的Shaw Space未保存回退为My Apps，用Edit工具再次写入确保保存生效
+12.1 Logo统一改为Shaw's Space：两处logo-text（导航栏L18 + 页脚L332）同步为带撇号的"Shaw's Space"；同时将nav-container的左侧padding从24px改为0px，让Shaw's Space真正贴到导航栏最左边
+13.0 布局优化：①作品网格由3列改为4列（桌面端一排4个App），新增1280px断点降为3列，1024px降为2列，640px降为1列；②作品卡片间距从20px调为16px；③page-layout的gap从0改为48px，让右侧聊天框与左侧主内容拉开距离往右挪
+14.0 背景底板&靠右修复：①page-layout去掉外层max-width+padding+margin（改为none/0），不与section-container叠加，消除左右两道色差竖缝；②page-sidebar去掉padding-right，让聊天框真正贴到浏览器最右缘；③page-main > section > .section-container 覆盖为max-width:none，大屏下主内容不再居中露白，保持和聊天框背景统一；④主内容和侧栏间距gap 48px→24px
+15.0 按参考图重构：左侧恢复Guang's Space单列居中布局（作品网格改回3列+gap20px+去掉1280px断点），右侧独立一列380px聊天框贴右缘；page-layout的max-width改为1520px+margin auto，左侧内容在1fr内自然居中
+16.0 聊天框贴右缘+背景统一：①page-layout去max-width限制，改为width:100%铺满，聊天框延伸到浏览器最右缘；②body背景改为暖米黄渐变#FAF6F0→#FDFBF7；③所有卡片统一白色#FFFFFF（Hero卡片、作品卡片、聊天框）；④聊天框加白色背景+左侧圆角边框，视觉上和其他卡片风格统一
+17.0 Logo贴左修复：nav-container去掉max-width:1200px限制和margin:auto居中，改为max-width:none+width:100%+margin:0，Logo真正贴到页面左缘
+18.1 Logo与内容对齐修复：nav-container恢复max-width:var(--max-width)+margin:0 auto，和section-container使用相同对齐基准，Logo与页面内容左边界完全对齐
+19.0 闹钟详情按真实项目更新：①读取com.mira.mathalarm项目源码（strings/RingtoneOption/MathProblemGenerator/AlarmState/Color/Manifest）同步到网站；②appsData[0]标题"极简数学闹钟"→"数学题闹钟"、图标橙#FF9F0A→#FF9500、描述改为含严格3-9题面/滚轮选时/精确闹钟/10分钟兜底的真实版本；③features6条+tags6个更新为真实功能；④appCardFields[0]卡片短描述替换；⑤index.html模态框默认占位文案同步更新（title/date/desc/features/tags）
+20.0 闹钟截图改为本地实际UI图：①创建website/images/目录；②将AI生成的3张copilot占位URL全部替换为本地相对路径images/alarm-1-home.png / alarm-2-ringing.png / alarm-3-ringtone.png；③用户只需把3张真机截图命名后放入该目录，网站立即显示实际界面
+21.0 全站占位身份→Shaw+shaw.cn真实品牌：①HTML L108下载按钮文字App Store→Shaw·shaw.cn；②页脚版权©2024张三.保留所有权利→©2026 Shaw·shaw.cn.保留所有权利；③Agent默认欢迎语"张三的AI助手"→"Shaw的AI助手（shaw.cn即将上线）"；④JS默认问候语末尾加"个人官网即将上线shaw.cn"；⑤JS自我介绍关键词段匹配+回复：msg.includes('张三')→msg.includes('Shaw')||msg.includes('shaw.cn')，回复末加"个人官网：shaw.cn（即将上线）"；⑥兜底联系邮箱hello@example.com→shaw@shaw.cn
+22.0 新增部署操作双清单：「部署-A-妙搭预览版步骤.txt」（5 步走妙搭 Web 控制台手动上传 index+css+js+images 即时拿预览链接，域名备案等待期专用）；「部署-B-备案通过后绑定火山TOS步骤.txt」（SSL免费证书申请→TOS绑定自定义域名+HTTPS→DNS解析后台加@/www两条CNAME→测试5分钟正式连shaw.cn）
