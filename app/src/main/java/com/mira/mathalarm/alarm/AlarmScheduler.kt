@@ -7,6 +7,7 @@ import android.content.Intent
 import android.os.Build
 import com.mira.mathalarm.data.AlarmDataStore
 import com.mira.mathalarm.data.AlarmState
+import com.mira.mathalarm.service.RingtoneService
 import com.mira.mathalarm.util.AppLogger
 import kotlinx.coroutines.flow.first
 import java.util.Calendar
@@ -22,7 +23,9 @@ class AlarmScheduler(private val context: Context) {
         private const val TAG = "AlarmScheduler"
         const val REQUEST_CODE_ALARM = 1001
         const val REQUEST_CODE_ALARM_EXACT = 1002  // 第二个独立 PendingIntent：setExactAndAllowWhileIdle 兜底
+        const val REQUEST_CODE_ALARM_SERVICE = 1003 // 第三个独立 PendingIntent：系统直接启动前台响铃Service，绕过ROM广播拦截
         const val EXTRA_ALARM_TRIGGER_TIME = "extra_alarm_trigger_time"
+        private const val MISSED_ALARM_RECOVERY_WINDOW_MS = 10 * 60 * 1000L
 
         /** setAlarm 返回值：表示设置失败（无权限 / 其他异常） */
         const val SET_ALARM_FAILED: Long = -1L
@@ -58,6 +61,24 @@ class AlarmScheduler(private val context: Context) {
     }
 
     /**
+     * 第三通路：AlarmManager 到点直接启动 RingtoneService。
+     * 部分 HyperOS 版本会保留 nextAlarmClock 记录却静默不投递 BroadcastReceiver；
+     * 使用独立的 foreground-service PendingIntent 可绕过这一层厂商广播拦截。
+     */
+    private fun buildRingingServicePendingIntent(triggerTime: Long): PendingIntent {
+        val intent = Intent(context, RingtoneService::class.java).apply {
+            action = RingtoneService.ACTION_START_RINGING
+            putExtra(EXTRA_ALARM_TRIGGER_TIME, triggerTime)
+        }
+        val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(context, REQUEST_CODE_ALARM_SERVICE, intent, pendingFlags)
+        } else {
+            PendingIntent.getService(context, REQUEST_CODE_ALARM_SERVICE, intent, pendingFlags)
+        }
+    }
+
+    /**
      * 设置闹钟（双保险挂两次，哪个先触发哪个生效，AlarmReceiver 内部用 state==RINGING 防重入）
      * 通路 1：setAlarmClock() —— 走系统闹钟栏，优先级最高、Doze豁免
      * 通路 2：setExactAndAllowWhileIdle() —— 独立 API，部分国产 ROM 杀进程后主通路失效时兜底
@@ -71,6 +92,7 @@ class AlarmScheduler(private val context: Context) {
 
         val alarmPi = buildAlarmPendingIntent(triggerTime)
         val exactPi = buildExactAlarmPendingIntent(triggerTime)
+        val servicePi = buildRingingServicePendingIntent(triggerTime)
         val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerTime, alarmPi)
 
         // ========== 通路 1：setAlarmClock（系统闹钟栏显示通路，官方优先级最高） ==========
@@ -105,6 +127,21 @@ class AlarmScheduler(private val context: Context) {
             AppLogger.w(TAG, "兜底通路 setExact* 未知异常，仅依赖主通路 setAlarmClock", e)
         }
 
+        // ========== 通路 3：直接启动前台响铃Service（绕过HyperOS广播静默拦截） ==========
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, servicePi)
+            } else {
+                alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerTime, servicePi)
+            }
+            AppLogger.eventW(TAG,
+                "DirectServiceAlarm" to "SCHEDULED",
+                "requestCode" to REQUEST_CODE_ALARM_SERVICE,
+                "triggerTime" to triggerTime)
+        } catch (t: Throwable) {
+            AppLogger.w(TAG, "第三通路：直接启动RingtoneService调度失败，仍保留前两条通路", t)
+        }
+
         // ========== 设置后立刻反查：验证系统闹钟栏是否真的挂了我们的闹钟 ==========
         try {
             val nextClock = alarmManager.nextAlarmClock
@@ -135,10 +172,12 @@ class AlarmScheduler(private val context: Context) {
     suspend fun cancelAlarm() {
         val alarmPi = buildAlarmPendingIntent(0L)
         val exactPi = buildExactAlarmPendingIntent(0L)
+        val servicePi = buildRingingServicePendingIntent(0L)
 
         alarmManager.cancel(alarmPi)
         alarmManager.cancel(exactPi)
-        AppLogger.d(TAG, "AlarmManager.cancel(双PendingIntent) 调用完成，闹钟已取消（主+兜底）")
+        alarmManager.cancel(servicePi)
+        AppLogger.d(TAG, "AlarmManager.cancel(三PendingIntent) 调用完成，闹钟已取消（AlarmClock+Exact广播+DirectService）")
 
         // ✅ Bug2 修复：cancelAlarm 时也强制停铃+关通知（防止任何残留）
         com.mira.mathalarm.service.RingtoneService.forceStopRingingAndNotify(context)
@@ -153,10 +192,12 @@ class AlarmScheduler(private val context: Context) {
     suspend fun disableAlarm() {
         val alarmPi = buildAlarmPendingIntent(0L)
         val exactPi = buildExactAlarmPendingIntent(0L)
+        val servicePi = buildRingingServicePendingIntent(0L)
 
         alarmManager.cancel(alarmPi)
         alarmManager.cancel(exactPi)
-        AppLogger.d(TAG, "用户点「失效」：双PendingIntent已从AlarmManager取消")
+        alarmManager.cancel(servicePi)
+        AppLogger.d(TAG, "用户点「失效」：三PendingIntent已从AlarmManager取消")
 
         // ✅ Bug2 修复：用户点失效时也强制停铃（防止上一轮铃还在响的情况）
         com.mira.mathalarm.service.RingtoneService.forceStopRingingAndNotify(context)
@@ -242,10 +283,28 @@ class AlarmScheduler(private val context: Context) {
             val now = System.currentTimeMillis()
             AppLogger.d(TAG, "restoreAlarmIfNeeded: ACTIVE状态 hour=$hour, minute=$minute, triggerTime=$triggerTime, 剩余${(triggerTime - now) / 1000}秒")
 
-            // 如果触发时间已过，说明是过期闹钟，清理
+            // v53：触发时间刚过不代表闹钟无效，可能是国产ROM漏投递广播/应用刚更新恢复。
+            // 10分钟响铃窗口内必须立即补触发；只有超过窗口才清理。
             if (triggerTime <= now) {
-                AppLogger.w(TAG, "restoreAlarmIfNeeded: 触发时间已过（过期闹钟），清理回到NOT_SET")
-                dataStore.cleanUpRingingState()
+                val overdueMs = now - triggerTime
+                if (overdueMs <= MISSED_ALARM_RECOVERY_WINDOW_MS) {
+                    AppLogger.eventW(TAG,
+                        "restoreAlarmIfNeeded" to "MISSED_ALARM_RECOVER_NOW",
+                        "overdue_ms" to overdueMs,
+                        "triggerTime" to triggerTime)
+                    val recoveryIntent = Intent(context, RingtoneService::class.java).apply {
+                        action = RingtoneService.ACTION_START_RINGING
+                        putExtra(EXTRA_ALARM_TRIGGER_TIME, triggerTime)
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(recoveryIntent)
+                    } else {
+                        context.startService(recoveryIntent)
+                    }
+                } else {
+                    AppLogger.w(TAG, "restoreAlarmIfNeeded: 已超过10分钟补响窗口（overdue=${overdueMs}ms），清理残留")
+                    dataStore.cleanUpRingingState()
+                }
                 return
             }
 
