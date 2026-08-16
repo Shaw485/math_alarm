@@ -13,28 +13,47 @@ import android.provider.Settings
  * 统一管理通知、精确闹钟、全屏通知、电池优化四类权限的检查与跳转
  * 按系统版本做条件判断，对应 PRD 5.14 权限的系统版本适配规则
  *
- * 新增第 5 类「后台保活 & 自启动」：
- *   - 国产 ROM（小米/Huawei/OPPO/vivo/荣耀等）无法程序化检测是否真的开了自启动
- *   - 只要用户**点击「去授权」成功跳转到对应 ROM 的设置页**，就持久化 hasCompletedAutostartGuide=true
- *   - 下次 ON_RESUME 回 App 视为该步已完成，避免无限循环要授权
- *   - 用户可随时手动在权限检查对话框里看到该项状态
+ * 第 5 类「后台保活 & 自启动」无法通过 Android 公共 API 读取真实开关状态，
+ * 因此只能让用户在系统页开启后回到 App 明确确认，不能把“去过设置页”冒充为已开启。
  */
 object PermissionChecker {
+    private const val PERMISSION_PREFS = "permission_guide_runtime"
+    private const val KEY_NOTIFICATION_PERMISSION_REQUESTED =
+        "notification_permission_requested"
 
-    private const val PREFS_NAME = "mathalarm_permission_prefs"
-    private const val KEY_AUTOSTART_GUIDE_COMPLETED = "has_completed_autostart_guide"
+    /**
+     * Android 13+ 在用户拒绝通知权限后，部分国产 ROM 会静默吞掉后续
+     * RequestPermission 请求。记录是否已经真正请求过，便于再次点击时改走
+     * 应用通知设置页，避免“去授权”按钮没有任何反应。
+     */
+    fun hasRequestedNotificationPermission(context: Context): Boolean =
+        context.getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NOTIFICATION_PERMISSION_REQUESTED, false)
 
-    /** 自启动引导：用户是否已经至少点击过一次「去授权」跳转（国产 ROM 无法程序化判断） */
-    fun hasCompletedAutostartGuide(context: Context): Boolean {
-        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_AUTOSTART_GUIDE_COMPLETED, false)
+    fun markNotificationPermissionRequested(context: Context) {
+        context.getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_NOTIFICATION_PERMISSION_REQUESTED, true)
+            .apply()
     }
 
-    /** 标记自启动引导已完成（用户点了「去授权」后返回 App 时调用） */
-    fun markAutostartGuideCompleted(context: Context) {
+
+    private const val PREFS_NAME = "mathalarm_permission_prefs"
+    // 新 key 故意不沿用旧版 has_completed_autostart_guide：旧版仅返回设置页就自动
+    // 写 true，不能代表真实授权。升级到 v60 后必须由用户明确确认一次。
+    private const val KEY_AUTOSTART_CONFIRMED_BY_USER_V60 =
+        "autostart_confirmed_by_user_v60"
+
+    /** 用户是否已在系统页开启自启动，并回到 App 明确点击“我已开启”。 */
+    fun isAutostartConfirmedByUser(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_AUTOSTART_CONFIRMED_BY_USER_V60, false)
+    }
+
+    fun markAutostartConfirmedByUser(context: Context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putBoolean(KEY_AUTOSTART_GUIDE_COMPLETED, true)
+            .putBoolean(KEY_AUTOSTART_CONFIRMED_BY_USER_V60, true)
             .apply()
     }
 
@@ -184,7 +203,8 @@ object PermissionChecker {
                 canScheduleExactAlarms(context) &&
                 canUseFullScreenIntent(context) &&
                 isIgnoringBatteryOptimizations(context) &&
-                canDrawOverlays(context)
+                canDrawOverlays(context) &&
+                isAutostartConfirmedByUser(context)
     }
 
     /**
@@ -197,6 +217,7 @@ object PermissionChecker {
         if (!canUseFullScreenIntent(context)) missing.add("全屏通知")
         if (!isIgnoringBatteryOptimizations(context)) missing.add("电池优化")
         if (!canDrawOverlays(context)) missing.add("悬浮窗")
+        if (!isAutostartConfirmedByUser(context)) missing.add("自启动确认")
         return missing
     }
 

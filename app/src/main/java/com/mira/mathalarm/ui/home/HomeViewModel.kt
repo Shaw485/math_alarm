@@ -332,7 +332,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             "perm_fullscreen" to (!missingPermissions.contains("全屏通知")),
             "perm_batteryOpt" to (!missingPermissions.contains("电池优化")),
             "perm_overlay" to (!missingPermissions.contains("悬浮窗")),
-            "perm_autostart" to (!missingPermissions.contains("自启动")))
+            "autostartConfirmedByUser" to (!missingPermissions.contains("自启动确认")))
         _uiState.value = _uiState.value.copy(
             hasAllPermissions = hasAllPermissions,
             missingPermissions = missingPermissions

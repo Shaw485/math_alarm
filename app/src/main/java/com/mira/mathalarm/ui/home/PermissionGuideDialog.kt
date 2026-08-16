@@ -1,8 +1,10 @@
 package com.mira.mathalarm.ui.home
 
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,6 +29,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -41,11 +44,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.mira.mathalarm.permission.PermissionChecker
+import com.mira.mathalarm.util.AppLogger
 import com.mira.mathalarm.ui.components.animatePressColor
 import com.mira.mathalarm.ui.components.pressAnimatedAlpha
 import com.mira.mathalarm.ui.components.pressAnimatedScale
@@ -65,6 +70,7 @@ fun PermissionGuideDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val activity = context as? Activity
 
     // 需要申请的权限列表（按顺序显示，名字对应 PermissionChecker 中的校验方法）
     val permissionSteps = remember {
@@ -85,7 +91,7 @@ fun PermissionGuideDialog(
             "全屏通知权限" -> PermissionChecker.canUseFullScreenIntent(context)
             "电池优化权限" -> PermissionChecker.isIgnoringBatteryOptimizations(context)
             "悬浮窗和后台弹出" -> PermissionChecker.canDrawOverlays(context)
-            "后台保活和自启动" -> PermissionChecker.hasCompletedAutostartGuide(context)  // 用户只要点过去过设置页就算完成
+            "后台保活和自启动" -> PermissionChecker.isAutostartConfirmedByUser(context)
             else -> true
         }
     }
@@ -171,9 +177,39 @@ fun PermissionGuideDialog(
     // =========================================================================
 
     // 1) 通知权限：Android 13+ 运行时权限，用户点允许/拒绝都有回调
+    var notificationRequestStartedAt by remember { mutableLongStateOf(0L) }
     val notificationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) {
+    ) { granted ->
+        val callbackDelayMs = SystemClock.elapsedRealtime() - notificationRequestStartedAt
+        val canAskAgain = activity?.let {
+            ActivityCompat.shouldShowRequestPermissionRationale(
+                it,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            )
+        } ?: false
+        AppLogger.event(
+            "PermissionGuide",
+            "notificationCallbackGranted" to granted,
+            "notificationsEnabled" to PermissionChecker.areNotificationsEnabled(context),
+            "canAskAgain" to canAskAgain,
+            "callbackDelayMs" to callbackDelayMs
+        )
+        // 旧版已经被拒绝、升级到本版后没有本地请求记录时，第一次 launch 仍可能被
+        // HyperOS 毫秒级静默拒绝。真实用户操作系统弹框通常耗时明显更久；识别到
+        // 1秒内返回且不可再询问时，立即打开通知设置，保证这一次点击就有反馈。
+        if (!granted && !canAskAgain && callbackDelayMs in 0..1_000) {
+            AppLogger.event(
+                "PermissionGuide",
+                "notificationAction" to "AUTO_OPEN_SETTINGS_AFTER_SILENT_DENIAL",
+                "callbackDelayMs" to callbackDelayMs
+            )
+            runCatching {
+                context.startActivity(PermissionChecker.getNotificationSettingsIntent(context))
+            }.onFailure {
+                context.startActivity(PermissionChecker.getAppDetailsSettingsIntent(context))
+            }
+        }
         // 不看 callback 里的 granted 值（有时回调是 false 但用户其实在设置里开了）
         // 统一用 PermissionChecker 真实检查一遍
         requestAdvance()
@@ -207,8 +243,13 @@ fun PermissionGuideDialog(
     val autostartLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) {
-        // ✅ 只要用户成功离开 App 去设置页再回来，就标记自启动引导已完成（持久化 KV）
-        PermissionChecker.markAutostartGuideCompleted(context)
+        // 国产 ROM 没有公开 API 能读取自启动开关，返回设置页不能等同于已开启。
+        // 保持在当前步骤，等待用户明确点击下方“我已开启，完成”。
+        AppLogger.event(
+            "PermissionGuide",
+            "autostartSettingsReturned" to true,
+            "confirmed" to PermissionChecker.isAutostartConfirmedByUser(context)
+        )
         requestAdvance()
     }
 
@@ -312,9 +353,40 @@ fun PermissionGuideDialog(
                             when (currentPermission) {
                                 "通知权限" -> {
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                        notificationLauncher.launch(
-                                            android.Manifest.permission.POST_NOTIFICATIONS
-                                        )
+                                        val permission = android.Manifest.permission.POST_NOTIFICATIONS
+                                        val hasRequested = PermissionChecker
+                                            .hasRequestedNotificationPermission(context)
+                                        val canAskAgain = activity?.let {
+                                            ActivityCompat.shouldShowRequestPermissionRationale(
+                                                it,
+                                                permission
+                                            )
+                                        } ?: false
+
+                                        if (!hasRequested || canAskAgain) {
+                                            // 首次申请，或系统明确允许再次弹框时，继续走运行时授权。
+                                            PermissionChecker.markNotificationPermissionRequested(context)
+                                            AppLogger.event(
+                                                "PermissionGuide",
+                                                "notificationAction" to "REQUEST_DIALOG",
+                                                "hasRequestedBefore" to hasRequested,
+                                                "canAskAgain" to canAskAgain
+                                            )
+                                            notificationRequestStartedAt = SystemClock.elapsedRealtime()
+                                            notificationLauncher.launch(permission)
+                                        } else {
+                                            // HyperOS/Android 16 拒绝后可能不再展示询问框，重复 launch
+                                            // 只会立即回调 false。直接进入应用通知设置，用户仍可授权。
+                                            AppLogger.event(
+                                                "PermissionGuide",
+                                                "notificationAction" to "OPEN_SETTINGS_AFTER_DENIAL",
+                                                "hasRequestedBefore" to hasRequested,
+                                                "canAskAgain" to canAskAgain
+                                            )
+                                            systemSettingsLauncher.launch(
+                                                PermissionChecker.getNotificationSettingsIntent(context)
+                                            )
+                                        }
                                     } else {
                                         // Android 12 及以下默认通知已开，直接找下一个未授权
                                         requestAdvance()
@@ -356,7 +428,11 @@ fun PermissionGuideDialog(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "去授权",
+                        text = if (currentPermission == "后台保活和自启动") {
+                            "打开自启动设置"
+                        } else {
+                            "去授权"
+                        },
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White
@@ -365,7 +441,8 @@ fun PermissionGuideDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // 兜底按钮：去系统设置开启
+                // 自启动无法程序化读取，必须由用户从系统页返回后明确确认；
+                // 其他权限保留“去系统设置开启”兜底入口。
                 val settingsInteraction = remember { MutableInteractionSource() }
                 Box(
                     modifier = Modifier
@@ -374,14 +451,27 @@ fun PermissionGuideDialog(
                             indication = null,
                             interactionSource = settingsInteraction
                         ) {
-                            goToAppDetails()
-                            onDismiss()
+                            if (currentPermission == "后台保活和自启动") {
+                                PermissionChecker.markAutostartConfirmedByUser(context)
+                                AppLogger.event(
+                                    "PermissionGuide",
+                                    "autostartUserConfirmation" to "CONFIRMED"
+                                )
+                                onDismiss()
+                            } else {
+                                goToAppDetails()
+                                onDismiss()
+                            }
                         }
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "去系统设置开启",
+                        text = if (currentPermission == "后台保活和自启动") {
+                            "我已开启，完成"
+                        } else {
+                            "去系统设置开启"
+                        },
                         fontSize = 14.sp,
                         color = AppColors.TextTertiary
                     )

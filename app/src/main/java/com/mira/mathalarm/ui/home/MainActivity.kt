@@ -626,7 +626,7 @@ private fun PermissionWarning(onClick: () -> Unit) {
 /**
  * 权限状态检查弹窗
  * 点击左下角「权限检查」按钮时显示
- * 实时校验四项权限状态，用户可选择直接跳权限引导
+ * 实时校验五项系统权限，并单独展示无法程序化读取的自启动确认状态。
  */
 @Composable
 private fun PermissionCheckDialog(
@@ -640,6 +640,10 @@ private fun PermissionCheckDialog(
     val exactAlarmEnabled = remember { mutableStateOf(PermissionChecker.canScheduleExactAlarms(context)) }
     val fullscreenEnabled = remember { mutableStateOf(PermissionChecker.canUseFullScreenIntent(context)) }
     val batteryEnabled = remember { mutableStateOf(PermissionChecker.isIgnoringBatteryOptimizations(context)) }
+    val overlayEnabled = remember { mutableStateOf(PermissionChecker.canDrawOverlays(context)) }
+    val autostartConfirmed = remember {
+        mutableStateOf(PermissionChecker.isAutostartConfirmedByUser(context))
+    }
 
     // 每次 recomposition（如返回弹窗后）重新检查
     LaunchedEffect(Unit) {
@@ -647,9 +651,12 @@ private fun PermissionCheckDialog(
         exactAlarmEnabled.value = PermissionChecker.canScheduleExactAlarms(context)
         fullscreenEnabled.value = PermissionChecker.canUseFullScreenIntent(context)
         batteryEnabled.value = PermissionChecker.isIgnoringBatteryOptimizations(context)
+        overlayEnabled.value = PermissionChecker.canDrawOverlays(context)
+        autostartConfirmed.value = PermissionChecker.isAutostartConfirmedByUser(context)
     }
 
-    val allOk = notifEnabled.value && exactAlarmEnabled.value && fullscreenEnabled.value && batteryEnabled.value
+    val allOk = notifEnabled.value && exactAlarmEnabled.value && fullscreenEnabled.value &&
+        batteryEnabled.value && overlayEnabled.value && autostartConfirmed.value
 
     Box(
         modifier = Modifier
@@ -686,7 +693,11 @@ private fun PermissionCheckDialog(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = if (allOk) "所有权限已开启，闹钟可正常工作" else "部分权限未开启，闹钟可能无法响铃",
+                    text = if (allOk) {
+                        "系统权限已开启，自启动已由你确认"
+                    } else {
+                        "仍有项目未开启或未确认，闹钟可能无法响铃"
+                    },
                     fontSize = 13.sp,
                     color = if (allOk) AppColors.Success else AppColors.Warning,
                     textAlign = TextAlign.Center
@@ -698,6 +709,13 @@ private fun PermissionCheckDialog(
                 PermissionCheckRow("精确闹钟权限", exactAlarmEnabled.value)
                 PermissionCheckRow("全屏通知权限", fullscreenEnabled.value)
                 PermissionCheckRow("电池优化权限", batteryEnabled.value)
+                PermissionCheckRow("悬浮窗权限", overlayEnabled.value)
+                PermissionCheckRow(
+                    name = "后台保活和自启动",
+                    isGranted = autostartConfirmed.value,
+                    grantedText = "已确认",
+                    deniedText = "待确认"
+                )
 
                 Spacer(modifier = Modifier.height(20.dp))
 
@@ -716,11 +734,22 @@ private fun PermissionCheckDialog(
                         .clickable(
                             indication = null,
                             interactionSource = btnInteraction
-                        ) { onGoGuide() },
+                        ) {
+                            if (allOk) {
+                                // 即使已经确认，用户也能随时重新进入自启动设置复查，
+                                // 不再出现“选项消失、无处重开”的问题。
+                                context.startActivity(
+                                    PermissionChecker.getAutostartSettingsIntent(context)
+                                )
+                                onDismiss()
+                            } else {
+                                onGoGuide()
+                            }
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (allOk) "重新检查权限" else "去开启权限",
+                        text = if (allOk) "复查自启动设置" else "去开启或确认",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White
@@ -744,7 +773,12 @@ private fun PermissionCheckDialog(
 }
 
 @Composable
-private fun PermissionCheckRow(name: String, isGranted: Boolean) {
+private fun PermissionCheckRow(
+    name: String,
+    isGranted: Boolean,
+    grantedText: String = "已开启",
+    deniedText: String = "未开启"
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -767,7 +801,7 @@ private fun PermissionCheckRow(name: String, isGranted: Boolean) {
             modifier = Modifier.weight(1f)
         )
         Text(
-            text = if (isGranted) "已开启" else "未开启",
+            text = if (isGranted) grantedText else deniedText,
             fontSize = 13.sp,
             color = if (isGranted) AppColors.Success else AppColors.Error,
             fontWeight = FontWeight.Medium
