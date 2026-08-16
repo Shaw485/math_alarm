@@ -190,6 +190,7 @@ class RingingActivity : ComponentActivity() {
         // 启动响铃服务（用带ACTION的intent，和AlarmReceiver一致，确保Service进入响铃分支）
         val intent = Intent(this, RingtoneService::class.java).apply {
             action = RingtoneService.ACTION_START_RINGING
+            putExtra(RingtoneService.EXTRA_RINGING_ACTIVITY_VISIBLE, true)
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -322,14 +323,27 @@ fun RingingScreen(
 
             Spacer(modifier = Modifier.height(40.dp))
 
-            // 题目
-            Text(
-                text = problem.displayText,
-                fontSize = 42.sp,
-                fontWeight = FontWeight.Bold,
-                color = AppColors.TextPrimary,
-                textAlign = TextAlign.Center
-            )
+            // 题目固定分两行。不再依赖 Text 按屏幕宽度自动换行：自动换行时字体
+            // 行高会让第二行「= ?」和第一行视觉粘连。
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = problem.formula,
+                    fontSize = 42.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppColors.TextPrimary,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "= ?",
+                    fontSize = 42.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppColors.TextPrimary,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1
+                )
+            }
 
             Spacer(modifier = Modifier.height(40.dp))
 

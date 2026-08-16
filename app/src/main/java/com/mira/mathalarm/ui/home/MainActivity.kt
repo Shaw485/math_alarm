@@ -148,11 +148,17 @@ fun HomeScreen(viewModel: HomeViewModel) {
             // M04 主按钮 / M05 次按钮
             MainButtons(
                 state = uiState.alarmState,
+                isEditing = uiState.isEditing,
                 onConfirmClick = {
-                    if (uiState.alarmState == AlarmState.ACTIVE) {
-                        viewModel.enterEditMode()
-                    } else {
-                        viewModel.confirmSetAlarm()
+                    when {
+                        uiState.alarmState != AlarmState.ACTIVE -> viewModel.confirmSetAlarm()
+                        uiState.isEditing -> viewModel.confirmSetAlarm()
+                        // 用户已经先滑动了时间，再点「修改闹钟」：直接保存。
+                        // 避免只进入编辑态、但系统 AlarmManager 仍保留旧时间。
+                        uiState.selectedHour != uiState.alarmHour ||
+                                uiState.selectedMinute != uiState.alarmMinute -> viewModel.confirmSetAlarm()
+                        // 时间还没改：先进入编辑态，按钮随即变成「确认修改」。
+                        else -> viewModel.enterEditMode()
                     }
                 },
                 onDisableClick = { viewModel.showDisableDialog() }
@@ -517,6 +523,7 @@ private fun SecondaryActions(
 @Composable
 private fun MainButtons(
     state: AlarmState,
+    isEditing: Boolean,
     onConfirmClick: () -> Unit,
     onDisableClick: () -> Unit
 ) {
@@ -545,7 +552,11 @@ private fun MainButtons(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = if (state == AlarmState.ACTIVE) "修改闹钟" else "确认设置",
+                text = when {
+                    state == AlarmState.ACTIVE && isEditing -> "确认修改"
+                    state == AlarmState.ACTIVE -> "修改闹钟"
+                    else -> "确认设置"
+                },
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = Color.White

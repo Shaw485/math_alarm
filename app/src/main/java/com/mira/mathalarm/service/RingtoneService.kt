@@ -18,6 +18,7 @@ import androidx.core.app.NotificationCompat
 import com.mira.mathalarm.R
 import com.mira.mathalarm.alarm.AlarmReceiver
 import com.mira.mathalarm.data.AlarmDataStore
+import com.mira.mathalarm.data.AlarmState
 import com.mira.mathalarm.data.RingtoneOption
 import com.mira.mathalarm.overlay.RingingOverlayController
 import com.mira.mathalarm.permission.PermissionChecker
@@ -43,6 +44,7 @@ class RingtoneService : Service() {
         private const val TAG = "RingtoneService"
         const val ACTION_START_RINGING = "com.mira.mathalarm.START_RINGING"
         const val ACTION_STOP_RINGING = "com.mira.mathalarm.STOP_RINGING"
+        const val EXTRA_RINGING_ACTIVITY_VISIBLE = "extra_ringing_activity_visible"
         const val NOTIFICATION_ID = 1001
         const val FULLSCREEN_NOTIFICATION_ID = com.mira.mathalarm.alarm.AlarmReceiver.FULLSCREEN_NOTIFICATION_ID // 1002
         const val CHANNEL_ID = "alarm_channel"
@@ -119,17 +121,60 @@ class RingtoneService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Activity 可能比 2.5s Overlay 兜底更晚才被 HyperOS 放行。一旦 Activity 真正
+        // onCreate，必须立即撤掉已经显示的 Overlay，否则会叠两道题、要求用户答两次。
+        if (intent?.getBooleanExtra(EXTRA_RINGING_ACTIVITY_VISIBLE, false) == true) {
+            AppLogger.eventW(TAG,
+                "RingingActivityVisible" to "HIDE_OVERLAY_NOW",
+                "startId" to startId,
+                "intentAction" to (intent.action ?: "null"))
+            overlayController?.hide()
+        }
+        // v52：START_STICKY 在进程被国产 ROM 重建时会回调 null Intent。
+        // 旧逻辑直接忽略，导致 MediaPlayer、1.5s Activity 重试和2.5s Overlay兜底全部丢失。
+        // 若 DataStore 仍处在有效响铃窗口，就把 null Intent 恢复成一次标准 START_RINGING。
+        val resolvedAction = if (intent?.action == null) {
+            val stateNow = runBlocking { runCatching { dataStore.alarmState.first() }.getOrDefault(AlarmState.NOT_SET) }
+            val isRingingNow = runBlocking { runCatching { dataStore.isRinging.first() }.getOrDefault(false) }
+            val triggerNow = runBlocking { runCatching { dataStore.alarmTriggerTime.first() }.getOrDefault(0L) }
+            val sinceTriggerMs = if (triggerNow > 0L) System.currentTimeMillis() - triggerNow else Long.MAX_VALUE
+            val recoverable = stateNow == AlarmState.RINGING && isRingingNow &&
+                sinceTriggerMs in -60_000L..(MAX_RINGING_DURATION_MS + 30_000L)
+            AppLogger.eventW(TAG,
+                "Svc-nullIntentRecovery" to if (recoverable) "RECOVER_AS_START_RINGING" else "IGNORE_STALE_AND_STOP",
+                "state" to stateNow.name,
+                "isRinging" to isRingingNow,
+                "triggerTime" to triggerNow,
+                "sinceTrigger_ms" to sinceTriggerMs,
+                "startId" to startId)
+            if (recoverable) ACTION_START_RINGING else null
+        } else intent.action
         AppLogger.event(TAG,
             "Svc-onStartCommand" to "START",
             "intent_action" to (intent?.action ?: "null"),
+            "resolved_action" to (resolvedAction ?: "null"),
             "start_flags" to flags,
             "startId" to startId)
         AppLogger.dumpIntent(TAG, "Svc-onStart", intent)
         AppLogger.dumpAudioStats(TAG, "Svc-preRinging", this)
-        when (intent?.action) {
+        when (resolvedAction) {
             ACTION_START_RINGING -> {
                 AppLogger.d(TAG, "【ACTION_START_RINGING 分支匹配成功】开始执行")
                 val svcStartTs = System.currentTimeMillis()
+                // v53：第三通路由 AlarmManager 直接启动 Service，不经过 AlarmReceiver，
+                // 因此 Service 必须自行把 ACTIVE 原子推进到 RINGING，确保进程重建/首页恢复逻辑拥有正确持久状态。
+                val stateBeforeStart = runBlocking {
+                    runCatching { dataStore.alarmState.first() }.getOrDefault(AlarmState.NOT_SET)
+                }
+                if (stateBeforeStart == AlarmState.ACTIVE) {
+                    runBlocking {
+                        dataStore.updateAlarmState(AlarmState.RINGING)
+                        dataStore.setIsRinging(true)
+                    }
+                    AppLogger.eventW(TAG,
+                        "DirectServiceStatePromotion" to "ACTIVE_TO_RINGING",
+                        "startId" to startId)
+                }
                 // ================================================================
                 // v51 BugA 修复：START_RINGING 重入保护（小米 HyperOS 双通路 setAlarmClock + setExactAndAllowWhileIdle 可能在 1.6s 内都触发，
                 //   上一轮 startId=1 的 MP 刚 start() 1.5s 后就被 startId=2 进来的 "旧 MediaPlayer 已释放" 干掉 → 听着就是"响一下就没了"）
@@ -303,7 +348,11 @@ class RingtoneService : Service() {
                     AppLogger.e(TAG, "ACTION_STOP_RINGING 异常（忽略）", t)
                 }
             }
-            null -> AppLogger.w(TAG, "intent.action == null，忽略此次启动")
+            null -> {
+                AppLogger.w(TAG, "null Intent 不在有效响铃窗口，停止空壳 Service，避免首页永久显示响铃中")
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
         }
         return START_STICKY
     }

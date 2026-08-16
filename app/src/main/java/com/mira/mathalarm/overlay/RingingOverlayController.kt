@@ -19,7 +19,14 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.mira.mathalarm.data.AlarmDataStore
 import com.mira.mathalarm.service.RingtoneService
 import com.mira.mathalarm.ui.ringing.RingingScreen
@@ -43,12 +50,14 @@ import kotlinx.coroutines.launch
  *   2) RingtoneService.forceStopRingingAndNotify() 停铃声+清前台通知+清SP标记
  *   3) DataStore.clearAlarm() 状态机回 NOT_SET
  *
- * ⚠️ Lifecycle/VM 设计（避开 androidx.* 版本冲突）：
- *   - 仅实现 LifecycleOwner，给 Compose 里 LaunchedEffect 生命周期用
- *   - SavedStateRegistryOwner/ViewModelStoreOwner 不 setViewTree*：我们直接 new RingingViewModel()，不通过 ViewModelProvider/rememberSaveable，不需要
- *   - 彻底避免 override val 报错（不同版本 lifecycle KClass/JvmName 不兼容）
+ * ComposeView 挂到 WindowManager 而非 Activity 时，必须手动提供三个 ViewTree owner：
+ * LifecycleOwner / SavedStateRegistryOwner / ViewModelStoreOwner。缺少后两者会在首次
+ * composition 时抛出未捕获异常，表现为 addView 成功后进程立即重启。
  */
-class RingingOverlayController(private val context: Context) : LifecycleOwner {
+class RingingOverlayController(private val context: Context) :
+    LifecycleOwner,
+    SavedStateRegistryOwner,
+    ViewModelStoreOwner {
 
     companion object {
         private const val TAG = "RingingOverlayController"
@@ -57,6 +66,11 @@ class RingingOverlayController(private val context: Context) : LifecycleOwner {
     // ===================== Lifecycle（Compose 里 lifecycle-aware 组件用） =====================
     private val lifecycleRegistry = LifecycleRegistry(this)
     override val lifecycle: Lifecycle = lifecycleRegistry
+    private val savedStateController = SavedStateRegistryController.create(this)
+    override val savedStateRegistry: SavedStateRegistry
+        get() = savedStateController.savedStateRegistry
+    override val viewModelStore: ViewModelStore = ViewModelStore()
+    private var ownersCreated = false
 
     // ===================== WindowManager + View =====================
     private var windowManager: WindowManager? = null
@@ -69,6 +83,15 @@ class RingingOverlayController(private val context: Context) : LifecycleOwner {
     private var fullWakeLock: PowerManager.WakeLock? = null
     private var keyguardLock: KeyguardManager.KeyguardLock? = null
     private var isScreenTurnedOn = false
+
+    private fun createViewTreeOwnersIfNeeded() {
+        if (ownersCreated) return
+        savedStateController.performAttach()
+        savedStateController.performRestore(null)
+        lifecycleRegistry.currentState = Lifecycle.State.CREATED
+        ownersCreated = true
+        AppLogger.d(TAG, "Compose ViewTree owners 已初始化：Lifecycle+SavedState+ViewModelStore")
+    }
 
     private fun forceTurnScreenOnAndUnlock(context: Context) {
         // 1. PowerManager FULL_WAKE_LOCK: 强制屏幕亮起（即使锁屏/黑屏也亮）
@@ -147,7 +170,7 @@ class RingingOverlayController(private val context: Context) : LifecycleOwner {
             forceTurnScreenOnAndUnlock(context)
             AppLogger.dumpWakeLockScreen(TAG, "Overlay-show-亮屏解锁后", context, extraWl = fullWakeLock)
 
-            lifecycleRegistry.currentState = Lifecycle.State.CREATED
+            createViewTreeOwnersIfNeeded()
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             this.windowManager = wm
 
@@ -162,7 +185,7 @@ class RingingOverlayController(private val context: Context) : LifecycleOwner {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 type,
                 buildFlags(),
-                PixelFormat.TRANSLUCENT
+                PixelFormat.OPAQUE
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
                 x = 0; y = 0
@@ -171,12 +194,18 @@ class RingingOverlayController(private val context: Context) : LifecycleOwner {
                 buttonBrightness = 1.0f
                 // 窗口动画：直接显示，不要系统淡入淡出过渡
                 windowAnimations = 0
+                // 答题页必须可获得输入焦点，并在数字键盘弹出时缩放布局。
+                // FLAG_ALT_FOCUSABLE_IM 会把 Overlay 放到 IME 上方且禁止与键盘交互，不能用。
+                softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
             }
 
             val cv = ComposeView(context)
             this.composeView = cv
             cv.setViewTreeLifecycleOwner(this)
-            // SavedStateRegistryOwner/ViewModelStoreOwner：不设（见顶部注释：我们直接 new VM，不走 Provider/savedState）
+            cv.setViewTreeSavedStateRegistryOwner(this)
+            cv.setViewTreeViewModelStoreOwner(this)
+            cv.isFocusable = true
+            cv.isFocusableInTouchMode = true
             lifecycleRegistry.currentState = Lifecycle.State.STARTED
 
             fun closeAlarm(reason: String) {
@@ -237,6 +266,14 @@ class RingingOverlayController(private val context: Context) : LifecycleOwner {
             wm.addView(cv, params)
             isViewAttached = true
             lifecycleRegistry.currentState = Lifecycle.State.RESUMED
+            cv.post {
+                cv.requestFocus()
+                AppLogger.event(TAG,
+                    "Overlay-requestFocus" to cv.hasFocus(),
+                    "attached" to cv.isAttachedToWindow,
+                    "width" to cv.width,
+                    "height" to cv.height)
+            }
             AppLogger.d(TAG, "show(): TYPE_APPLICATION_OVERLAY 全屏悬浮答题页已挂载, ${params.width}x${params.height},type=$type,triggerTime=$triggerTime")
             AppLogger.dumpWmParams(TAG, "Overlay-after-addView", params, cv)
 
@@ -340,20 +377,22 @@ class RingingOverlayController(private val context: Context) : LifecycleOwner {
         }
         composeView = null
         isViewAttached = false
+        viewModelStore.clear()
     }
 
     private fun buildFlags(): Int {
         var flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                // HyperOS 使用透明手势/导航栏；不越过系统栏布局时，Overlay 高度
+                // 会比完整屏幕少134px，底部就会透出锁屏壁纸。该 flag 只负责布局范围，
+                // v54 已修复的 Compose ViewTree owners 才是原先进程重启的根因。
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
-                WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM or
-                WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             @Suppress("DEPRECATION")
             flags = flags or WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
         } else {
             // Android 11+ (API 30+) 废弃 FLAG_SHOW_WHEN_LOCKED/TURN_SCREEN_ON，但小米 HyperOS
             // 对这些 flag 仍然吃（TYPE_APPLICATION_OVERLAY 在锁屏上显示必须有它们）
@@ -361,8 +400,7 @@ class RingingOverlayController(private val context: Context) : LifecycleOwner {
             @Suppress("DEPRECATION")
             flags = flags or WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
         }
         return flags
     }

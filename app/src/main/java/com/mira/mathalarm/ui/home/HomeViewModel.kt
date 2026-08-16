@@ -1,6 +1,8 @@
 package com.mira.mathalarm.ui.home
 
 import android.app.Application
+import android.content.Intent
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mira.mathalarm.alarm.AlarmScheduler
@@ -8,6 +10,7 @@ import com.mira.mathalarm.data.AlarmDataStore
 import com.mira.mathalarm.data.AlarmState
 import com.mira.mathalarm.data.RingtoneOption
 import com.mira.mathalarm.permission.PermissionChecker
+import com.mira.mathalarm.service.RingtoneService
 import com.mira.mathalarm.ui.ringing.RingingActivity
 import com.mira.mathalarm.util.AppLogger
 import kotlinx.coroutines.Job
@@ -26,6 +29,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "HomeViewModel"
+        private const val MAX_VALID_RINGING_AGE_MS = 10 * 60 * 1000L + 30_000L
     }
 
     private val context = application.applicationContext
@@ -71,14 +75,16 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 remainingTimeMillis = initRemaining
             )
 
-            // 如果之前是响铃中状态，App重启说明是异常终止，回到未设置
+            // v52：RINGING 不代表异常终止。国产 ROM 可能在答题 Overlay 刚挂载后重建进程，
+            // 此时清状态会立即 stopService + 移除答题页，表现为“响一下就能关掉”。
+            // 统一交给 refreshAlarmState() 按 triggerTime/isRinging 判断，并在需要时恢复 Service。
             if (isRinging || state == AlarmState.RINGING) {
-                _uiState.value = _uiState.value.copy(
-                    alarmState = AlarmState.NOT_SET,
-                    isRinging = false,
-                    remainingTimeMillis = 0L
-                )
-                dataStore.clearAlarm()
+                AppLogger.eventW(TAG,
+                    "HomeVM-init-RINGING" to "DEFER_TO_REFRESH(禁止旧逻辑直接clearAlarm)",
+                    "state" to state.name,
+                    "isRinging" to isRinging,
+                    "triggerTime" to triggerTime)
+                refreshAlarmState()
             }
 
             // 启动倒计时刷新
@@ -186,17 +192,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val hour = _uiState.value.selectedHour
         val minute = _uiState.value.selectedMinute
         val remaining = alarmScheduler.calculateTimeUntilAlarm(hour, minute)
-        AppLogger.d(TAG, "enterEditMode: 用户点修改闹钟，hour=$hour, minute=$minute, 预计剩余=${remaining / 1000}秒")
+        AppLogger.w(TAG, "enterEditMode: 仅进入编辑态，尚未重新调度系统闹钟；hour=$hour, minute=$minute, 预计剩余=${remaining / 1000}秒")
         _uiState.value = _uiState.value.copy(
             isEditing = true,
             remainingTimeMillis = remaining,
-            showSetSuccessToast = true
+            // 只有 confirmSetAlarm() 真正写入 AlarmManager/DataStore 后才能显示成功 Toast。
+            // 旧逻辑在此显示「将在 X 后响铃」，会让用户误以为修改已保存。
+            showSetSuccessToast = false
         )
-
-        viewModelScope.launch {
-            delay(3000)
-            _uiState.value = _uiState.value.copy(showSetSuccessToast = false)
-        }
     }
 
     /**
@@ -442,8 +445,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     val createdTrigger = RingingActivity.getCreatedTrigger(context)
                     val canDrawOverlayNow = PermissionChecker.canDrawOverlays(context)
                     val evidenceActOnCreate = (createdTrigger == triggerTime && triggerTime > 0L)
-                    val evidenceOverlay = canDrawOverlayNow
-                    val reallyRinging = evidenceActOnCreate || evidenceOverlay
+                    val sinceTriggerMs = if (triggerTime > 0L) System.currentTimeMillis() - triggerTime else Long.MAX_VALUE
+                    val triggerInRingingWindow = sinceTriggerMs in -60_000L..MAX_VALID_RINGING_AGE_MS
+                    // canDrawOverlays 只是权限，不是“悬浮窗当前还挂着”的证据。
+                    // 真正可靠的持久证据是：DS明确标记正在响 + trigger仍在10分钟响铃窗口内。
+                    val reallyRinging = isRingingNow && triggerInRingingWindow
                     RingingActivity.dumpRuntimePrefs(TAG, "HomeVM-RINGING-check", context)
                     AppLogger.eventW(TAG,
                         "HomeVM-RINGING-decision" to "START",
@@ -451,14 +457,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         "dsTrigger" to triggerTime,
                         "matchActOnCreate" to evidenceActOnCreate,
                         "canDrawOverlays" to canDrawOverlayNow,
+                        "triggerInRingingWindow" to triggerInRingingWindow,
                         "reallyRinging(不应清)" to reallyRinging,
-                        "sinceTrigger_ms" to if (triggerTime>0L) (System.currentTimeMillis()-triggerTime) else -1L,
+                        "sinceTrigger_ms" to sinceTriggerMs,
                         "dsIsRinging" to isRingingNow)
                     if (reallyRinging) {
                         // ✅ 真的正在响：UI State 保留为 RINGING，倒计时停，什么都不动（前台服务/铃声/Overlay 继续跑）
                         AppLogger.eventW(TAG,
                             "HomeVM-RINGING-decision" to "KEEP-RINGING(保留响铃状态，不动服务和界面)",
-                            "reason" to if (evidenceActOnCreate) "createdTrigger==dsTrigger(RingingActivity真onCreate)" else "canDrawOverlays=true(Overlay在挂中)")
+                            "reason" to if (evidenceActOnCreate) "createdTrigger==dsTrigger(RingingActivity真onCreate)" else "DS正在响且trigger仍在10分钟窗口内，恢复Service/Overlay")
                         countdownJob?.cancel()
                         _uiState.value = _uiState.value.copy(
                             alarmState = AlarmState.RINGING,
@@ -466,9 +473,13 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                             remainingTimeMillis = 0L,
                             ringtoneOption = ringtoneOption
                         )
+                        // Activity 没有成功 onCreate 时，主动重发带 ACTION 的 Service Intent。
+                        // 即便系统刚用 START_STICKY 重建过 Service，内部幂等保护也不会重复释放 MediaPlayer。
+                        if (!evidenceActOnCreate) {
+                            ensureRingingServiceRunning(triggerTime, "HomeVM-refresh-RINGING")
+                        }
                     } else {
-                        // ⚠️ 两条证据都不成立 = 真·异常残留（createdTrigger=0 && canDrawOverlays=false）
-                        //   例：Service 被杀了但 DS 里 state=RINGING 没清干净，这时才清回 NOT_SET
+                        // 超过10分钟窗口或 DS 已明确 isRinging=false，才是真异常残留。
                         AppLogger.w(TAG, "refreshAlarmState: 分支RINGING（确认真·异常残留），清理回NOT_SET+clearAlarm")
                         countdownJob?.cancel()
                         _uiState.value = _uiState.value.copy(
@@ -480,6 +491,26 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
+        }
+    }
+
+    private fun ensureRingingServiceRunning(triggerTime: Long, source: String) {
+        val serviceIntent = Intent(context, RingtoneService::class.java).apply {
+            action = RingtoneService.ACTION_START_RINGING
+            putExtra(AlarmScheduler.EXTRA_ALARM_TRIGGER_TIME, triggerTime)
+        }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+            AppLogger.eventW(TAG,
+                "ensureRingingService" to "REQUESTED",
+                "source" to source,
+                "triggerTime" to triggerTime)
+        }.onFailure {
+            AppLogger.e(TAG, "ensureRingingServiceRunning($source) 启动失败", it)
         }
     }
 
