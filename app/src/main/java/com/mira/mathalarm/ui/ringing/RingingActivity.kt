@@ -300,7 +300,9 @@ fun RingingScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 32.dp)
-                .padding(top = 80.dp, bottom = 40.dp),
+                // v57 题目拆成两行后多占了约 60dp，原布局的 weight 空白被压到0，
+                // 答案框就会紧贴数字 1/2/3。收紧上方间距，为输入区留出固定间隔。
+                .padding(top = 48.dp, bottom = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // 顶部：时间 + 倒计时
@@ -310,7 +312,7 @@ fun RingingScreen(
                 color = AppColors.TextTertiary
             )
 
-            Spacer(modifier = Modifier.height(40.dp))
+            Spacer(modifier = Modifier.height(28.dp))
 
             // 标题（PRD M09-C01）
             Text(
@@ -321,7 +323,7 @@ fun RingingScreen(
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(40.dp))
+            Spacer(modifier = Modifier.height(28.dp))
 
             // 题目固定分两行。不再依赖 Text 按屏幕宽度自动换行：自动换行时字体
             // 行高会让第二行「= ?」和第一行视觉粘连。
@@ -345,7 +347,7 @@ fun RingingScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.height(40.dp))
+            Spacer(modifier = Modifier.height(28.dp))
 
             // 答案输入框（显示用）
             Box(
@@ -377,6 +379,9 @@ fun RingingScreen(
             }
 
             Spacer(modifier = Modifier.weight(1f))
+
+            // 即使小屏幕上 weight 被压缩，也始终保证输入框与数字键盘之间有可见间距。
+            Spacer(modifier = Modifier.height(24.dp))
 
             // 数字键盘
             NumberKeypad(

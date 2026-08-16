@@ -180,9 +180,16 @@ class RingingOverlayController(private val context: Context) :
                 @Suppress("DEPRECATION")
                 WindowManager.LayoutParams.TYPE_PHONE
 
+            // MATCH_PARENT 在 Android 11+ 依然会默认按 systemBars insets 裁切；真机日志中
+            // WindowMetrics=1200x2670，Overlay 却只有1200x2394，上下各露出一段壁纸。
+            // 直接使用完整 WindowMetrics 像素尺寸，再在 LayoutParams 中关闭系统栏 inset 适配。
+            val fullBounds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                wm.currentWindowMetrics.bounds
+            } else null
+
             val params = WindowManager.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
+                fullBounds?.width() ?: ViewGroup.LayoutParams.MATCH_PARENT,
+                fullBounds?.height() ?: ViewGroup.LayoutParams.MATCH_PARENT,
                 type,
                 buildFlags(),
                 PixelFormat.OPAQUE
@@ -197,7 +204,24 @@ class RingingOverlayController(private val context: Context) :
                 // 答题页必须可获得输入焦点，并在数字键盘弹出时缩放布局。
                 // FLAG_ALT_FOCUSABLE_IM 会把 Overlay 放到 IME 上方且禁止与键盘交互，不能用。
                 softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    // TYPE_APPLICATION_OVERLAY 也会继承默认 fitInsetsTypes(systemBars)。清空后
+                    // 背景可画到透明状态栏/导航栏后方，系统图标仍在最上层。
+                    setFitInsetsTypes(0)
+                    setFitInsetsSides(0)
+                    setFitInsetsIgnoringVisibility(true)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
             }
+
+            AppLogger.event(TAG,
+                "Overlay-targetFullScreen" to (fullBounds != null),
+                "targetW" to params.width,
+                "targetH" to params.height,
+                "fitInsetsTypes" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) params.fitInsetsTypes else -1)
 
             val cv = ComposeView(context)
             this.composeView = cv
